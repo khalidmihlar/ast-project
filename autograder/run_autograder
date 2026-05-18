@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+RESULTS_DIR=/autograder/results
+WORK_DIR=/autograder/work
+SRC_DIR="$WORK_DIR/src/assignment3"
+CLASS_DIR="$WORK_DIR/classes"
+mkdir -p "$RESULTS_DIR" "$SRC_DIR" "$CLASS_DIR"
+
+cp /autograder/source/assignment3/ArrayCollectionGrader.java "$SRC_DIR/ArrayCollectionGrader.java"
+
+# Copy the single submitted Java file into package assignment3 as ArrayCollection.java.
+# This supports experimental submissions where ArrayCollection.java was renamed
+# to a de-identified animal/student filename. It also supports package assignment3;,
+# no package declaration, or a different package declaration.
+set +e
+python3 <<'PY'
+from pathlib import Path
+import re, sys
+sub = Path('/autograder/submission')
+out = Path('/autograder/work/src/assignment3')
+java_files = sorted([p for p in sub.rglob('*.java') if p.is_file()])
+if not java_files:
+    sys.stderr.write('No .java file was submitted. Submit exactly one Java file containing class ArrayCollection.\n')
+    sys.exit(2)
+
+def has_arraycollection_class(path):
+    text = path.read_text(errors='replace')
+    return re.search(r'\bclass\s+ArrayCollection\b', text) is not None
+
+# In the intended experiment, there is exactly one uploaded .java file. If there
+# are extras, prefer the one whose contents define ArrayCollection.
+matches = [p for p in java_files if has_arraycollection_class(p)]
+source = matches[0] if matches else java_files[0]
+text = source.read_text(errors='replace')
+
+# Normalize package so the grader can reference assignment3.ArrayCollection.
+if re.search(r'^\s*package\s+[^;]+;', text, flags=re.MULTILINE):
+    text = re.sub(r'^\s*package\s+[^;]+;', 'package assignment3;', text, count=1, flags=re.MULTILINE)
+else:
+    text = 'package assignment3;\n\n' + text
+
+# The submitted filename may be Bear.java, Otter.java, etc., but a public Java
+# class named ArrayCollection must live in ArrayCollection.java to compile.
+(out / 'ArrayCollection.java').write_text(text)
+print(f'Using submitted file {source.name} as ArrayCollection.java')
+PY
+PY_STATUS=$?
+set -e
+if [ "$PY_STATUS" -ne 0 ]; then
+  python3 <<'PY'
+import json
+from pathlib import Path
+err = 'No .java file was submitted. Submit exactly one Java file containing class ArrayCollection.'
+Path('/autograder/results/results.json').write_text(json.dumps({
+    'score': 0.0,
+    'visibility': 'visible',
+    'stdout_visibility': 'visible',
+    'output': err,
+    'tests': [{
+        'name': 'Submission file detection',
+        'score': 0.0,
+        'max_score': 68.0,
+        'output': err,
+        'visibility': 'visible'
+    }]
+}, indent=2))
+PY
+  exit 0
+fi
+
+cd "$WORK_DIR"
+COMPILE_OUT="$RESULTS_DIR/compile_output.txt"
+RUN_OUT="$RESULTS_DIR/stdout.txt"
+
+if ! javac -Xlint:unchecked -d "$CLASS_DIR" "$SRC_DIR"/*.java > "$COMPILE_OUT" 2>&1; then
+  python3 <<'PY'
+import json
+from pathlib import Path
+out = Path('/autograder/results/compile_output.txt').read_text(errors='replace')
+Path('/autograder/results/results.json').write_text(json.dumps({
+    'score': 0.0,
+    'visibility': 'visible',
+    'stdout_visibility': 'visible',
+    'output': 'Compilation failed. Make sure the submitted Java file defines public class ArrayCollection. The submitted file may have any filename; the autograder copies it internally to ArrayCollection.java.\n\n' + out[-12000:],
+    'tests': [{
+        'name': 'Compilation',
+        'score': 0.0,
+        'max_score': 68.0,
+        'output': out[-12000:],
+        'visibility': 'visible'
+    }]
+}, indent=2))
+PY
+  exit 0
+fi
+
+# Run the grader. Capture runtime failures but still emit results.json.
+set +e
+java -cp "$CLASS_DIR" assignment3.ArrayCollectionGrader > "$RUN_OUT" 2>&1
+STATUS=$?
+set -e
+
+python3 <<'PY'
+import json, re
+from pathlib import Path
+stdout = Path('/autograder/results/stdout.txt').read_text(errors='replace')
+compile_out = Path('/autograder/results/compile_output.txt').read_text(errors='replace')
+max_score = 68.0
+score = 0.0
+m = re.search(r'Automated ArrayCollection Score:\s*([0-9]+(?:\.[0-9]+)?)/([0-9]+(?:\.[0-9]+)?)', stdout)
+if not m:
+    m = re.search(r'\n\s*([0-9]+(?:\.[0-9]+)?)/([0-9]+(?:\.[0-9]+)?) points', stdout)
+if m:
+    score = float(m.group(1))
+    max_score = float(m.group(2))
+
+cat_re = re.compile(r'^([^:\n]+):\s*\n?\s*(\d+)/(\d+) tests\s*\n\s*([0-9]+(?:\.[0-9]+)?)/(\d+) points', re.MULTILINE)
+tests = []
+for name, passed, run, pts, maxpts in cat_re.findall(stdout):
+    tests.append({
+        'name': name.strip(),
+        'score': float(pts),
+        'max_score': float(maxpts),
+        'output': f'{passed}/{run} tests passed',
+        'visibility': 'visible'
+    })
+
+if not tests:
+    tests.append({
+        'name': 'ArrayCollection autograder',
+        'score': score,
+        'max_score': max_score,
+        'output': stdout[-12000:],
+        'visibility': 'visible'
+    })
+
+output = stdout
+if compile_out.strip():
+    output = 'Compiler warnings:\n' + compile_out + '\n\nProgram output:\n' + stdout
+
+Path('/autograder/results/results.json').write_text(json.dumps({
+    'score': score,
+    'visibility': 'visible',
+    'stdout_visibility': 'visible',
+    'output': output[-20000:],
+    'tests': tests
+}, indent=2))
+PY
